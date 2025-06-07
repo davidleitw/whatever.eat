@@ -1,16 +1,12 @@
 import logging
 import random
-from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, LocationMessage
-from config import config
-from map_service import nearby_search
-
-app = Flask(__name__)
+from src.config.settings import config
+from src.map_service.client import nearby_search
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
@@ -77,7 +73,7 @@ class LineBotManager:
             logger.info("🔍 Calling nearby_search API...")
             resp = nearby_search(latitude, longitude)
             logger.info(f"✅ Nearby search completed, found {len(resp)} restaurants")
-            
+
             # Randomly select one restaurant
             if resp:
                 selected_restaurant = random.choice(resp)
@@ -169,53 +165,4 @@ class LineBotManager:
     
     def is_initialized(self):
         """Check if LINE Bot is properly initialized"""
-        return bool(self.line_bot_api and self.handler)
-
-
-# Create LINE Bot manager instance
-line_bot_manager = LineBotManager()
-
-
-@app.route("/callback", methods=['POST'])
-def callback():
-    """Handle LINE webhook callback"""
-    if not line_bot_manager.is_initialized():
-        abort(500, "LINE Bot not initialized")
-
-    signature = request.headers['X-Line-Signature']
-    body = request.get_data(as_text=True)
-
-    try:
-        line_bot_manager.handle_webhook(body, signature)
-    except InvalidSignatureError:
-        abort(400)
-    except RuntimeError:
-        abort(500)
-    
-    return 'OK'
-
-
-@app.route("/")
-def health_check():
-    """Health check endpoint"""
-    return "LINE Bot is running! 🤖"
-
-
-@app.route("/config")
-def show_config():
-    """Display current configuration status"""
-    return {
-        "status": "running",
-        "port": config.PORT,
-        "debug": config.DEBUG,
-        "access_token_set": bool(config.LINE_CHANNEL_ACCESS_TOKEN),
-        "channel_secret_set": bool(config.LINE_CHANNEL_SECRET),
-        "line_bot_initialized": line_bot_manager.is_initialized()
-    }
-
-
-if __name__ == "__main__":
-    if line_bot_manager.initialize():
-        app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG)
-    else:
-        print("❌ Cannot start server without proper LINE Bot configuration") 
+        return bool(self.line_bot_api and self.handler) 

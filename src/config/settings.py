@@ -6,7 +6,7 @@ def load_env():
     Load environment variables from .env file
     Returns True if .env file exists and is loaded, False otherwise
     """
-    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    env_path = os.path.join(os.path.dirname(__file__), '../../.env')
     
     if os.path.exists(env_path):
         load_dotenv(env_path)
