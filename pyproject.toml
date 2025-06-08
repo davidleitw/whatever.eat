@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
     "flask>=3.1.1",
     "google-maps-places>=0.2.1",
+    "langgraph>=0.4.8",
     "line-bot-sdk>=3.17.1",
     "python-dotenv>=1.1.0",
 ]
