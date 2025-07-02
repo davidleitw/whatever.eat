@@ -354,3 +354,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Makefile generated files
+.pids/
+server.log
+ngrok.log
+nohup.out
