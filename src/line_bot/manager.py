@@ -114,34 +114,78 @@ class LineBotManager:
             # If we can't determine the status, assume it's open to avoid filtering out
             return True
     
-    def _select_open_restaurant(self, restaurants, max_attempts=10):
+    def _select_open_restaurant(self, restaurants, user_id: str, max_attempts=10):
         """
-        Select a random restaurant that is currently open
+        Select a random restaurant that is currently open and not recently recommended.
         
         Args:
             restaurants: List of restaurant objects from Google Places API
+            user_id: LINE user ID for tracking recommendation history
             max_attempts: Maximum number of attempts to find an open restaurant
             
         Returns:
-            tuple: (selected_restaurant, attempt_count) or (None, attempt_count) if no open restaurant found
+            tuple: (selected_restaurant, attempt_count) or (None, attempt_count) if no restaurant found
         """
         if not restaurants:
             logger.warning("⚠️ No restaurants provided to select from")
             return None, 0
         
+        # Helper function to get restaurant ID
+        def get_restaurant_id(restaurant) -> str:
+            # Use Google Place ID if available, otherwise use display name as fallback
+            place_id = getattr(restaurant, 'id', None)
+            if place_id:
+                return place_id
+            
+            display_name = getattr(restaurant, 'display_name', None)
+            if display_name and hasattr(display_name, 'text'):
+                return display_name.text
+            
+            return 'unknown_restaurant'
+        
+        # Get user's recent recommendations to avoid duplicates
+        recent_recommendations = self.session_manager.get_recent_recommendations(user_id)
+        logger.info(f"🔍 User {user_id} has {len(recent_recommendations)} recent recommendations")
+        
+        # Filter out recently recommended restaurants
+        available_restaurants = []
+        excluded_count = 0
+        
+        for restaurant in restaurants:
+            restaurant_id = get_restaurant_id(restaurant)
+            if not self.session_manager.is_recently_recommended(user_id, restaurant_id):
+                available_restaurants.append(restaurant)
+            else:
+                excluded_count += 1
+                restaurant_name = getattr(restaurant, 'display_name', None)
+                restaurant_name = restaurant_name.text if restaurant_name else 'Unknown'
+                logger.info(f"🚫 Excluded recently recommended restaurant: {restaurant_name}")
+        
+        logger.info(f"📊 Available restaurants: {len(available_restaurants)}, Excluded: {excluded_count}")
+        
+        # If no restaurants available (all recently recommended), reset and use all
+        if not available_restaurants:
+            logger.info("🔄 All restaurants recently recommended, resetting to full list")
+            available_restaurants = restaurants
+        
         attempt_count = 0
         open_restaurants = []
         
         # First, try to find restaurants that are definitely open
-        for restaurant in restaurants:
+        for restaurant in available_restaurants:
             if self._is_restaurant_open(restaurant):
                 open_restaurants.append(restaurant)
         
         if open_restaurants:
             selected = random.choice(open_restaurants)
+            restaurant_id = get_restaurant_id(selected)
             restaurant_name = getattr(selected, 'display_name', None)
             restaurant_name = restaurant_name.text if restaurant_name else 'Unknown'
-            logger.info(f"✅ Selected open restaurant: {restaurant_name}")
+            
+            # Add to recommendation history
+            self.session_manager.add_recommendation(user_id, restaurant_id)
+            
+            logger.info(f"✅ Selected open restaurant: {restaurant_name} (ID: {restaurant_id})")
             return selected, 1
         
         # If no restaurants are confirmed open, try random selection with retry mechanism
@@ -149,21 +193,30 @@ class LineBotManager:
         
         while attempt_count < max_attempts:
             attempt_count += 1
-            selected_restaurant = random.choice(restaurants)
+            selected_restaurant = random.choice(available_restaurants)
+            restaurant_id = get_restaurant_id(selected_restaurant)
             restaurant_name = getattr(selected_restaurant, 'display_name', None)
             restaurant_name = restaurant_name.text if restaurant_name else 'Unknown'
             
             logger.info(f"🎲 Attempt {attempt_count}: Checking restaurant {restaurant_name}")
             
             if self._is_restaurant_open(selected_restaurant):
-                logger.info(f"✅ Found open restaurant after {attempt_count} attempts: {restaurant_name}")
+                # Add to recommendation history
+                self.session_manager.add_recommendation(user_id, restaurant_id)
+                
+                logger.info(f"✅ Found open restaurant after {attempt_count} attempts: {restaurant_name} (ID: {restaurant_id})")
                 return selected_restaurant, attempt_count
             else:
                 logger.info(f"❌ Restaurant {restaurant_name} is currently closed, trying again...")
         
         # If we couldn't find an open restaurant after max attempts, return a random one
         logger.warning(f"⚠️ Could not find open restaurant after {max_attempts} attempts, returning random selection")
-        final_selection = random.choice(restaurants)
+        final_selection = random.choice(available_restaurants)
+        final_restaurant_id = get_restaurant_id(final_selection)
+        
+        # Still add to recommendation history to prevent immediate re-selection
+        self.session_manager.add_recommendation(user_id, final_restaurant_id)
+        
         return final_selection, attempt_count
     
     def _handle_text_message(self, event: TextMessage):
@@ -345,13 +398,20 @@ class LineBotManager:
         
         opening_hours_info = self._format_opening_hours(restaurant)
         
-        # Get user session for recommendation stats
+        # Get user session for recommendation stats (after recommendation was added)
         user_session = self.session_manager.get_user_session(user_id)
         recent_count = user_session.get_recent_count() if user_session else 0
         total_count = user_session.recommendation_count if user_session else 0
         
         selection_info = f"🎯 第 {attempt_count} 次嘗試找到營業中餐廳" if attempt_count > 1 else "🎲 智能推薦餐廳"
-        duplicate_prevention = "🔄 防重複推薦 (5次內不重複)" if recent_count > 1 else "🆕 首次推薦"
+        
+        # Show appropriate duplicate prevention status
+        if total_count == 1:
+            duplicate_prevention = "🆕 首次推薦"
+        elif recent_count <= 5:
+            duplicate_prevention = f"🔄 防重複推薦 ({recent_count}/5 記錄中)"
+        else:
+            duplicate_prevention = "🔄 防重複推薦 (已滿 5 次記錄)"
         
         return (
             f"🍽️ **為您推薦餐廳！**\n\n"
