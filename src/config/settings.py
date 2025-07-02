@@ -28,7 +28,8 @@ class Config:
         self.LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
         self.LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
         self.GOOGLE_MAP_API_KEY = os.getenv('GOOGLE_MAP_API_TOKEN')
-        
+        self.OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
         # Server configuration
         self.PORT = int(os.getenv('PORT', 5000))
         self.DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
@@ -51,7 +52,9 @@ class Config:
         
         if require_google_maps and not self.GOOGLE_MAP_API_KEY:
             missing_vars.append('GOOGLE_MAP_API_TOKEN')
-        
+
+        self.enable_llm_mode = self.OPENAI_API_KEY is not None
+
         if missing_vars:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
         
@@ -72,6 +75,7 @@ class Config:
         print(f"   ACCESS_TOKEN: {'✅ Set' if self.LINE_CHANNEL_ACCESS_TOKEN else '❌ Missing'}")
         print(f"   CHANNEL_SECRET: {'✅ Set' if self.LINE_CHANNEL_SECRET else '❌ Missing'}")
         print(f"   GOOGLE_MAP_API_KEY: {'✅ Set' if self.GOOGLE_MAP_API_KEY else '❌ Missing'}")
+        print(f"   OPENAI_API_KEY: {'✅ Set' if self.OPENAI_API_KEY else '❌ Missing'}")
 
 # Create global config instance
 config = Config() 

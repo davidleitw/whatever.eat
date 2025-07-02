@@ -4,7 +4,7 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, LocationMessage
 from src.config.settings import config
-from src.map_service.client import nearby_search
+from src.map.client import nearby_search
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -40,7 +40,129 @@ class LineBotManager:
                 lambda event: self._handle_location_message(event)
             )
     
-    def _handle_text_message(self, event):
+    def _format_opening_hours(self, restaurant) -> str:
+        """
+        Format restaurant opening hours information
+        
+        Args:
+            restaurant: Restaurant object from Google Places API
+            
+        Returns:
+            str: Formatted opening hours string
+        """
+        try:
+            # Check if regular_opening_hours exists
+            if not hasattr(restaurant, 'regular_opening_hours') or not restaurant.regular_opening_hours:
+                return "營業時間資訊不可用"
+            
+            opening_hours = restaurant.regular_opening_hours
+            
+            # Get current status (open/closed)
+            current_status = "目前營業中" if getattr(opening_hours, 'open_now', False) else "目前休息中"
+            
+            # Get weekday descriptions if available
+            weekday_descriptions = getattr(opening_hours, 'weekday_descriptions', [])
+            
+            if weekday_descriptions:
+                # Format the opening hours with current status and weekly schedule
+                hours_info = f"🕒 {current_status}\n\n📅 營業時間：\n"
+                for day_info in weekday_descriptions:
+                    hours_info += f"   {day_info}\n"
+                return hours_info.strip()
+            else:
+                # Fallback to just current status if detailed hours not available
+                return f"🕒 {current_status}"
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Error formatting opening hours: {str(e)}")
+            return "營業時間資訊處理時發生錯誤"
+    
+    def _is_restaurant_open(self, restaurant) -> bool:
+        """
+        Check if a restaurant is currently open
+        
+        Args:
+            restaurant: Restaurant object from Google Places API
+            
+        Returns:
+            bool: True if restaurant is currently open, False otherwise
+        """
+        try:
+            # Check if regular_opening_hours exists
+            if not hasattr(restaurant, 'regular_opening_hours') or not restaurant.regular_opening_hours:
+                # If opening hours info is not available, assume it's open (to avoid filtering out too many restaurants)
+                restaurant_name = getattr(restaurant, 'display_name', None)
+                restaurant_name = restaurant_name.text if restaurant_name else 'Unknown'
+                logger.info(f"📋 No opening hours info for {restaurant_name} - assuming open")
+                return True
+            
+            opening_hours = restaurant.regular_opening_hours
+            is_open = getattr(opening_hours, 'open_now', False)
+            
+            restaurant_name = getattr(restaurant, 'display_name', None)
+            restaurant_name = restaurant_name.text if restaurant_name else 'Unknown'
+            logger.info(f"🕒 Restaurant {restaurant_name} open status: {'Open' if is_open else 'Closed'}")
+            
+            return is_open
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error checking restaurant open status: {str(e)}")
+            # If we can't determine the status, assume it's open to avoid filtering out
+            return True
+    
+    def _select_open_restaurant(self, restaurants, max_attempts=10):
+        """
+        Select a random restaurant that is currently open
+        
+        Args:
+            restaurants: List of restaurant objects from Google Places API
+            max_attempts: Maximum number of attempts to find an open restaurant
+            
+        Returns:
+            tuple: (selected_restaurant, attempt_count) or (None, attempt_count) if no open restaurant found
+        """
+        if not restaurants:
+            logger.warning("⚠️ No restaurants provided to select from")
+            return None, 0
+        
+        attempt_count = 0
+        open_restaurants = []
+        
+        # First, try to find restaurants that are definitely open
+        for restaurant in restaurants:
+            if self._is_restaurant_open(restaurant):
+                open_restaurants.append(restaurant)
+        
+        if open_restaurants:
+            selected = random.choice(open_restaurants)
+            restaurant_name = getattr(selected, 'display_name', None)
+            restaurant_name = restaurant_name.text if restaurant_name else 'Unknown'
+            logger.info(f"✅ Selected open restaurant: {restaurant_name}")
+            return selected, 1
+        
+        # If no restaurants are confirmed open, try random selection with retry mechanism
+        logger.info("🔄 No confirmed open restaurants found, trying random selection with retry...")
+        
+        while attempt_count < max_attempts:
+            attempt_count += 1
+            selected_restaurant = random.choice(restaurants)
+            restaurant_name = getattr(selected_restaurant, 'display_name', None)
+            restaurant_name = restaurant_name.text if restaurant_name else 'Unknown'
+            
+            logger.info(f"🎲 Attempt {attempt_count}: Checking restaurant {restaurant_name}")
+            
+            if self._is_restaurant_open(selected_restaurant):
+                logger.info(f"✅ Found open restaurant after {attempt_count} attempts: {restaurant_name}")
+                return selected_restaurant, attempt_count
+            else:
+                logger.info(f"❌ Restaurant {restaurant_name} is currently closed, trying again...")
+        
+        # If we couldn't find an open restaurant after max attempts, return a random one
+        logger.warning(f"⚠️ Could not find open restaurant after {max_attempts} attempts, returning random selection")
+        final_selection = random.choice(restaurants)
+        return final_selection, attempt_count
+    
+    def _handle_text_message(self, event: TextMessage):
         """Handle text messages from users"""
         user_message = event.message.text
         reply_text = f"Hello! You said: {user_message}"
@@ -50,10 +172,10 @@ class LineBotManager:
             TextSendMessage(text=reply_text)
         )
     
-    def _handle_location_message(self, event):
+    def _handle_location_message(self, event: LocationMessage):
         """Handle location messages from users"""
         logger.info("🌍 Starting location message handling")
-        
+
         try:
             location = event.message
             logger.info(f"📍 Location message received from user: {event.source.user_id}")
@@ -63,7 +185,7 @@ class LineBotManager:
             address = location.address or "No address provided"
             latitude = location.latitude
             longitude = location.longitude
-            
+
             logger.info(f"📋 Location details extracted:")
             logger.info(f"   • Title: {title}")
             logger.info(f"   • Address: {address}")
@@ -74,47 +196,61 @@ class LineBotManager:
             resp = nearby_search(latitude, longitude)
             logger.info(f"✅ Nearby search completed, found {len(resp)} restaurants")
 
-            # Randomly select one restaurant
+            # Randomly select one restaurant that is currently open
             if resp:
-                selected_restaurant = random.choice(resp)
-                logger.info(f"🎲 Randomly selected restaurant: {selected_restaurant.display_name.text}")
+                selected_restaurant, attempt_count = self._select_open_restaurant(resp)
                 
-                # Extract restaurant details
-                restaurant_name = selected_restaurant.display_name.text
-                restaurant_rating = getattr(selected_restaurant, 'rating', 'N/A')
-                restaurant_address = getattr(selected_restaurant, 'formatted_address', 'Address not available')
-                restaurant_types = getattr(selected_restaurant, 'types', [])
-                restaurant_price_level = getattr(selected_restaurant, 'price_level', 'N/A')
-                
-                # Get opening hours if available
-                opening_hours = "Not available"
-                if hasattr(selected_restaurant, 'opening_hours') and selected_restaurant.opening_hours:
-                    if hasattr(selected_restaurant.opening_hours, 'open_now'):
-                        opening_hours = "Open now" if selected_restaurant.opening_hours.open_now else "Closed now"
-                
-                logger.info(f"📊 Restaurant details:")
-                logger.info(f"   • Name: {restaurant_name}")
-                logger.info(f"   • Rating: {restaurant_rating}")
-                logger.info(f"   • Address: {restaurant_address}")
-                logger.info(f"   • Types: {restaurant_types}")
-                logger.info(f"   • Price Level: {restaurant_price_level}")
-                logger.info(f"   • Opening Hours: {opening_hours}")
-                
-                # Create detailed reply message for the selected restaurant
-                reply_text = (
-                    f"📍 Location Received!\n\n"
-                    f"🏷️ Your Location: {title}\n"
-                    f"📮 Address: {address}\n"
-                    f"🌐 Coordinates: {latitude}, {longitude}\n\n"
-                    f"🎲 Randomly Selected Restaurant:\n\n"
-                    f"🍴 {restaurant_name}\n"
-                    f"⭐ Rating: {restaurant_rating}\n"
-                    f"📍 Address: {restaurant_address}\n"
-                    f"🏷️ Types: {', '.join(restaurant_types) if restaurant_types else 'Not specified'}\n"
-                    f"💰 Price Level: {restaurant_price_level}\n"
-                    f"🕒 Status: {opening_hours}\n\n"
-                    f"🔗 Google Maps: https://maps.google.com/?q={latitude},{longitude}"
-                )
+                if selected_restaurant is None:
+                    logger.warning("⚠️ No restaurants available after selection process")
+                    reply_text = (
+                        f"📍 Location Received!\n\n"
+                        f"🏷️ Your Location: {title}\n"
+                        f"📮 Address: {address}\n"
+                        f"🌐 Coordinates: {latitude}, {longitude}\n\n"
+                        f"😔 Sorry, no restaurants found in this area.\n"
+                        f"🔗 Google Maps: https://maps.google.com/?q={latitude},{longitude}"
+                    )
+                else:
+                    print(selected_restaurant)
+                    restaurant_name = getattr(selected_restaurant, 'display_name', None)
+                    restaurant_name = restaurant_name.text if restaurant_name else 'Unknown'
+                    logger.info(f"🎯 Selected restaurant after {attempt_count} attempt(s): {restaurant_name}")
+                    
+                    # Extract restaurant details
+                    restaurant_rating = getattr(selected_restaurant, 'rating', 'N/A')
+                    restaurant_address = getattr(selected_restaurant, 'formatted_address', 'Address not available')
+                    restaurant_types = getattr(selected_restaurant, 'types', [])
+                    restaurant_price_level = getattr(selected_restaurant, 'price_level', 'N/A')
+                    restaurant_google_maps_uri = getattr(selected_restaurant, 'google_maps_uri', 'N/A')
+                    
+                    # Get formatted opening hours using the existing method
+                    opening_hours_info = self._format_opening_hours(selected_restaurant)
+                    
+                    logger.info(f"📊 Restaurant details:")
+                    logger.info(f"   • Name: {restaurant_name}")
+                    logger.info(f"   • Rating: {restaurant_rating}")
+                    logger.info(f"   • Address: {restaurant_address}")
+                    logger.info(f"   • Types: {restaurant_types}")
+                    logger.info(f"   • Price Level: {restaurant_price_level}")
+                    logger.info(f"   • Opening Hours: {opening_hours_info}")
+                    
+                    # Create detailed reply message for the selected restaurant
+                    selection_info = f"🎯 Selected after {attempt_count} attempt(s)" if attempt_count > 1 else "🎲 Randomly Selected Restaurant"
+                    
+                    reply_text = (
+                        f"📍 Location Received!\n\n"
+                        f"🏷️ Your Location: {title}\n"
+                        f"📮 Address: {address}\n"
+                        f"🌐 Coordinates: {latitude}, {longitude}\n\n"
+                        f"{selection_info}:\n\n"
+                        f"🍴 {restaurant_name}\n"
+                        f"⭐ Rating: {restaurant_rating}\n"
+                        f"📍 Address: {restaurant_address}\n"
+                        f"🏷️ Types: {', '.join(restaurant_types) if restaurant_types else 'Not specified'}\n"
+                        f"💰 Price Level: {restaurant_price_level}\n\n"
+                        f"{opening_hours_info}\n\n"
+                        f"🔗 Google Maps: {restaurant_google_maps_uri}"
+                    )
             else:
                 logger.warning("⚠️ No restaurants found in the area")
                 reply_text = (
