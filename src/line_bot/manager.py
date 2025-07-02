@@ -265,8 +265,8 @@ class LineBotManager:
                     f"• 或移動到餐廳較多的區域"
                 )
             
-            # Select a restaurant
-            selected_restaurant, attempt_count = self._select_open_restaurant(restaurants)
+            # Select a restaurant (with duplicate prevention)
+            selected_restaurant, attempt_count = self._select_open_restaurant(restaurants, user_id)
             
             if selected_restaurant is None:
                 return (
@@ -277,7 +277,7 @@ class LineBotManager:
                 )
             
             # Format restaurant information
-            return self._format_restaurant_recommendation(selected_restaurant, user_location, attempt_count)
+            return self._format_restaurant_recommendation(selected_restaurant, user_location, attempt_count, user_id)
             
         except Exception as e:
             logger.error(f"❌ Error getting restaurant recommendation: {str(e)}")
@@ -332,7 +332,7 @@ class LineBotManager:
             f"或者直接分享您的位置開始使用！"
         )
     
-    def _format_restaurant_recommendation(self, restaurant, user_location: UserLocation, attempt_count: int) -> str:
+    def _format_restaurant_recommendation(self, restaurant, user_location: UserLocation, attempt_count: int, user_id: str) -> str:
         """Format restaurant recommendation into user-friendly message"""
         restaurant_name = getattr(restaurant, 'display_name', None)
         restaurant_name = restaurant_name.text if restaurant_name else 'Unknown'
@@ -345,11 +345,19 @@ class LineBotManager:
         
         opening_hours_info = self._format_opening_hours(restaurant)
         
-        selection_info = f"🎯 第 {attempt_count} 次嘗試找到營業中餐廳" if attempt_count > 1 else "🎲 隨機推薦餐廳"
+        # Get user session for recommendation stats
+        user_session = self.session_manager.get_user_session(user_id)
+        recent_count = user_session.get_recent_count() if user_session else 0
+        total_count = user_session.recommendation_count if user_session else 0
+        
+        selection_info = f"🎯 第 {attempt_count} 次嘗試找到營業中餐廳" if attempt_count > 1 else "🎲 智能推薦餐廳"
+        duplicate_prevention = "🔄 防重複推薦 (5次內不重複)" if recent_count > 1 else "🆕 首次推薦"
         
         return (
             f"🍽️ **為您推薦餐廳！**\n\n"
-            f"📍 **您的位置**：{user_location.title}\n\n"
+            f"📍 **您的位置**：{user_location.title}\n"
+            f"📊 **推薦統計**：第 {total_count} 次推薦\n"
+            f"🛡️ **防重複**：{duplicate_prevention}\n\n"
             f"{selection_info}\n\n"
             f"🍴 **{restaurant_name}**\n"
             f"⭐ 評分：{restaurant_rating}\n"
@@ -358,7 +366,8 @@ class LineBotManager:
             f"💰 價位：{restaurant_price_level}\n\n"
             f"{opening_hours_info}\n\n"
             f"🔗 [Google Maps 導航]({restaurant_google_maps_uri})\n\n"
-            f"💡 想要換一家？再輸入「抽餐廳」即可！"
+            f"💡 想要換一家？再輸入「抽餐廳」即可！\n"
+            f"🎯 已記錄此推薦，近 5 次內不會重複推薦此餐廳"
         )
     
     def handle_webhook(self, body, signature):
